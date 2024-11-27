@@ -7,10 +7,7 @@ import datetime
 from tqdm import tqdm
 
 # dataset mapping
-dataset_map = {
-    'movielens-32m': 'ml-32m',
-    'movielens-latest-small': 'ml-latest-small'
-}
+dataset_keys = {'ml-32m', 'ml-1m', 'ml-latest-small'}
 
 
 def padding_seq(seq, max_len, padding_value=0):
@@ -41,31 +38,32 @@ def padding_seq_2d(seq_2d, max_seq_len, max_len, padding_value=0):
 class MovieLensDataset(Dataset):
 
     def __init__(self,
-                 data_dir,
+                 dataset_name,
                  type='vanilla',
                  split='train',
                  augmentation=False,
                  max_seq_length=30):
         super().__init__()
-        self.data_dir = data_dir
+        self.data_dir = os.path.join('data', dataset_name)
+        self.dataset_name = dataset_name
         self.split = split
         self.augmentation = augmentation
         self.max_seq_length = max_seq_length
         self.type = type
 
-        if not os.path.exists(os.path.join(data_dir, 'vanilla_train.csv')):
+        if not os.path.exists(os.path.join(self.data_dir, 'vanilla_train.csv')):
             self._preprocess()
 
         # load dataset
         if split == 'train':
-            filepath = os.path.join(data_dir, f'{type}_train.csv')
+            filepath = os.path.join(self.data_dir, f'{type}_train.csv')
         elif split == 'test':
-            filepath = os.path.join(data_dir, f'{type}_test.csv')
+            filepath = os.path.join(self.data_dir, f'{type}_test.csv')
         else:
             raise ValueError(f"Expected split ['train', 'test'], got {split}")
         self.dataset = pd.read_csv(filepath)
         # load genre vocab
-        vocab_path = os.path.join(data_dir, 'genre_vocab.txt')
+        vocab_path = os.path.join(self.data_dir, 'genre_vocab.txt')
         with open(vocab_path, 'r') as f:
             genres = sorted(f.read().splitlines())
         self.genre_vocab = {g: i + 1 for i, g in enumerate(genres)}
@@ -143,6 +141,23 @@ class MovieLensDataset(Dataset):
         print("-- Preprocessing the original MovieLens dataset.")
         ratings_path = os.path.join(self.data_dir, 'ratings.csv')
         movies_path = os.path.join(self.data_dir, 'movies.csv')
+
+        if self.dataset_name == 'ml-1m':
+            # reformat the .dat into .csv
+            ratings = pd.read_csv(
+                os.path.join(self.data_dir, 'ratings.dat'),
+                sep='::',
+                header=None,
+                names=['userId', 'movieId', 'rating', 'timestamp'])
+            ratings.to_csv(ratings_path, index=False)
+
+            movies = pd.read_csv(os.path.join(self.data_dir, 'movies.dat'),
+                                 sep='::',
+                                 header=None,
+                                 names=['movieId', 'title', 'genres'],
+                                 encoding="ISO-8859-1")
+            movies.to_csv(movies_path, index=False)
+
         if not os.path.exists(ratings_path):
             raise ValueError('ratings.csv not found!')
         if not os.path.exists(movies_path):
@@ -372,13 +387,11 @@ class RecSysDataset(object):
                  augmentation=False,
                  max_seq_length=200):
         self.dataset = None
-        if dataset_name not in dataset_map:
-            raise ValueError(
-                f'Invalid dataset-name: {dataset_name}.\n'
-                'Should be one of the following: {dataset_map.keys()}')
-        if dataset_name in ('movielens-32m', 'movielens-latest-small'):
-            data_dir = f'data/{dataset_map[dataset_name]}'
-            self.dataset = MovieLensDataset(data_dir=data_dir,
+        if dataset_name not in dataset_keys:
+            raise ValueError(f'Invalid dataset-name: {dataset_name}.\n'
+                             f'Should be one of the following: {dataset_keys}')
+        if dataset_name in ('ml-32m', 'ml-latest-small', 'ml-1m'):
+            self.dataset = MovieLensDataset(dataset_name=dataset_name,
                                             split=split,
                                             type=movielens_type,
                                             augmentation=augmentation,
@@ -390,7 +403,7 @@ class RecSysDataset(object):
 
 if __name__ == '__main__':
     from torch.utils.data import DataLoader
-    movielens_dataset = RecSysDataset(dataset_name='movielens-32m',
+    movielens_dataset = RecSysDataset(dataset_name='ml-1m',
                                       movielens_type='sequence').get_dataset()
     dataloader = DataLoader(movielens_dataset, batch_size=4)
     # print(next(iter(dataloader)))
