@@ -1,8 +1,10 @@
 import torch
-import numpy as np
 import pandas as pd
+import numpy as np
 from torch.utils.data import Dataset
 import os
+import datetime
+from tqdm import tqdm
 
 # dataset mapping
 dataset_map = {
@@ -20,7 +22,7 @@ def padding_seq(seq, max_len, padding_value=0):
     for i, item in enumerate(seq):
         out_seq[i] = item
         out_mask[i] = 1
-    return (out_seq, out_mask)
+    return (np.array(out_seq), np.array(out_mask))
 
 
 def padding_seq_2d(seq_2d, max_seq_len, max_len, padding_value=0):
@@ -33,7 +35,7 @@ def padding_seq_2d(seq_2d, max_seq_len, max_len, padding_value=0):
                                     padding_value=padding_value)
         out_seq[i] = seq
         out_seq_mask[i] = seq_mask
-    return (out_seq, out_seq_mask)
+    return (np.array(out_seq), np.array(out_seq_mask))
 
 
 class MovieLensDataset(Dataset):
@@ -43,13 +45,17 @@ class MovieLensDataset(Dataset):
                  type='vanilla',
                  split='train',
                  augmentation=False,
-                 max_seq_length=200):
+                 max_seq_length=30):
         super().__init__()
         self.data_dir = data_dir
         self.split = split
         self.augmentation = augmentation
         self.max_seq_length = max_seq_length
         self.type = type
+
+        if not os.path.exists(os.path.join(data_dir, 'vanilla_train.csv')):
+            self._preprocess()
+
         # load dataset
         if split == 'train':
             filepath = os.path.join(data_dir, f'{type}_train.csv')
@@ -90,9 +96,12 @@ class MovieLensDataset(Dataset):
 
             # target item features
             target_movie_id = int(self.dataset.loc[idx, 'targetMovieId'])
-            target_genre, _ = padding_seq(str(
-                self.dataset.loc[idx, 'targetGenre']).split('|'),
-                                          max_len=self.genre_vocab + 1)
+            target_genre = [
+                self.genre_vocab.get(x, 0)
+                for x in self.dataset.loc[idx, 'targetGenre'].split('|')
+            ]
+            target_genre, _ = padding_seq(target_genre,
+                                          max_len=len(self.genre_vocab) + 1)
 
             feats = {
                 'movie_id_seq': movie_id_seq,
@@ -112,9 +121,12 @@ class MovieLensDataset(Dataset):
             # get features
             movie_id = int(self.dataset.loc[idx, 'movieId'])
             user_id = int(self.dataset.loc[idx, 'userId'])
-            genre, genre_mask = padding_seq(
-                self.dataset.loc[idx, 'genre'].split('|'),
-                max_len=len(self.genre_vocab) + 1)
+            genre = [
+                self.genre_vocab.get(x, 0)
+                for x in self.dataset.loc[idx, 'genre'].split('|')
+            ]
+            genre, genre_mask = padding_seq(genre,
+                                            max_len=len(self.genre_vocab) + 1)
             feats = {
                 'user_id': user_id,
                 'movie_id': movie_id,
@@ -125,7 +137,230 @@ class MovieLensDataset(Dataset):
             label = float(self.dataset.loc[idx, 'rating'])
             return feats, label
         else:
-            raise ValueError(f"Invalid type: {type}!")
+            raise ValueError(f'Invalid type: {type}!')
+
+    def _preprocess(self):
+        print("-- Preprocessing the original MovieLens dataset.")
+        ratings_path = os.path.join(self.data_dir, 'ratings.csv')
+        movies_path = os.path.join(self.data_dir, 'movies.csv')
+        if not os.path.exists(ratings_path):
+            raise ValueError('ratings.csv not found!')
+        if not os.path.exists(movies_path):
+            raise ValueError('movies.csv not found!')
+
+        # load ratings
+        ratings = pd.read_csv(ratings_path)
+        ratings['month'] = ratings['timestamp'].map(
+            lambda ts: datetime.datetime.fromtimestamp(ts).month)
+        ratings['day'] = ratings['timestamp'].map(
+            lambda ts: datetime.datetime.fromtimestamp(ts).day)
+        ratings['hour'] = ratings['timestamp'].map(
+            lambda ts: datetime.datetime.fromtimestamp(ts).hour)
+
+        # load movies
+        movies = pd.read_csv(movies_path)
+        genre_vocab = set()
+        for genre in movies['genres']:
+            for g in genre.split('|'):
+                genre_vocab.add(g)
+        print(f"-- Genre vocab size: {len(genre_vocab)}")
+        with open('data/ml-latest-small/genre_vocab.txt', 'w') as f:
+            f.write('\n'.join(sorted(genre_vocab)))
+
+        df = pd.merge(left=ratings, right=movies, how='left',
+                      on='movieId').reset_index(drop=True)
+
+        # get unique users
+        users = df['userId'].unique()
+        print(f"-- Total users: {len(users)}")
+
+        # generate datasets
+        test_user_ids = []
+        test_feat_genres = []
+        test_feat_movie_ids = []
+        test_feat_ratings = []
+        test_feat_months = []
+        test_feat_days = []
+        test_feat_hours = []
+        test_label_genres = []
+        test_label_movie_ids = []
+        test_label_ratings = []
+        test_label_months = []
+        test_label_days = []
+        test_label_hours = []
+
+        train_user_ids = []
+        train_feat_genres = []
+        train_feat_movie_ids = []
+        train_feat_ratings = []
+        train_feat_months = []
+        train_feat_days = []
+        train_feat_hours = []
+        train_label_genres = []
+        train_label_movie_ids = []
+        train_label_ratings = []
+        train_label_months = []
+        train_label_days = []
+        train_label_hours = []
+
+        # vanilla dataset
+        train_vanilla_dfs = []
+        for uid in tqdm(users):
+            tmp = df[df['userId'] == uid].sort_values('timestamp').reset_index(
+                drop=True)
+            if len(tmp) < 20:
+                continue
+            tmp_movies = tmp['movieId'].astype(str).tolist()
+            tmp_ratings = tmp['rating'].astype(str).tolist()
+            tmp_genres = tmp['genres'].astype(str).tolist()
+            tmp_months = tmp['month'].astype(str).tolist()
+            tmp_days = tmp['day'].astype(str).tolist()
+            tmp_hours = tmp['hour'].astype(str).tolist()
+
+            # generate test dataset
+            test_size = int(len(tmp_movies) * 0.2)
+            if test_size > 20:
+                test_size = 20
+
+            for _ in range(test_size):
+                label_genre = tmp_genres.pop()
+                label_movid_id = tmp_movies.pop()
+                label_rating = tmp_ratings.pop()
+                label_month = tmp_months.pop()
+                label_day = tmp_days.pop()
+                label_hour = tmp_hours.pop()
+
+                feat_genre = ','.join(tmp_genres)
+                feat_movie_id = ','.join(tmp_movies)
+                feat_rating = ','.join(tmp_ratings)
+                feat_month = ','.join(tmp_months)
+                feat_day = ','.join(tmp_days)
+                feat_hour = ','.join(tmp_hours)
+
+                test_user_ids.append(str(uid))
+
+                test_feat_genres.append(feat_genre)
+                test_feat_movie_ids.append(feat_movie_id)
+                test_feat_ratings.append(feat_rating)
+                test_feat_months.append(feat_month)
+                test_feat_days.append(feat_day)
+                test_feat_hours.append(feat_hour)
+
+                test_label_genres.append(label_genre)
+                test_label_movie_ids.append(label_movid_id)
+                test_label_ratings.append(label_rating)
+                test_label_months.append(label_month)
+                test_label_days.append(label_day)
+                test_label_hours.append(label_hour)
+
+            # generate train vanilla dataset
+            vanilla_user_ids = [uid] * len(tmp_ratings)
+            tmp_vanilla = pd.DataFrame({
+                "userId": vanilla_user_ids,
+                "movieId": tmp_movies,
+                "rating": tmp_ratings,
+                "genre": tmp_genres,
+                "month": tmp_months,
+                "day": tmp_days,
+                "hour": tmp_hours
+            })
+            train_vanilla_dfs.append(tmp_vanilla)
+
+            # generate train dataset for seq
+            train_size = int(len(tmp_ratings) * 0.5)
+            if train_size > 200:
+                train_size = 200
+
+            for _ in range(train_size):
+                label_genre = tmp_genres.pop()
+                label_movid_id = tmp_movies.pop()
+                label_rating = tmp_ratings.pop()
+                label_month = tmp_months.pop()
+                label_day = tmp_days.pop()
+                label_hour = tmp_hours.pop()
+
+                feat_genre = ','.join(tmp_genres)
+                feat_movie_id = ','.join(tmp_movies)
+                feat_rating = ','.join(tmp_ratings)
+                feat_month = ','.join(tmp_months)
+                feat_day = ','.join(tmp_days)
+                feat_hour = ','.join(tmp_hours)
+
+                train_user_ids.append(str(uid))
+
+                train_feat_genres.append(feat_genre)
+                train_feat_movie_ids.append(feat_movie_id)
+                train_feat_ratings.append(feat_rating)
+                train_feat_months.append(feat_month)
+                train_feat_days.append(feat_day)
+                train_feat_hours.append(feat_hour)
+
+                train_label_genres.append(label_genre)
+                train_label_movie_ids.append(label_movid_id)
+                train_label_ratings.append(label_rating)
+                train_label_months.append(label_month)
+                train_label_days.append(label_day)
+                train_label_hours.append(label_hour)
+
+        # constructing train and test vanilla dataset
+        train_vanilla_df = pd.concat(train_vanilla_dfs)
+        print("-- Train vanilla shape: {}".format(train_vanilla_df.shape))
+        train_vanilla_df.to_csv(os.path.join(self.data_dir,
+                                             'vanilla_train.csv'),
+                                index=False)
+
+        test_vanilla_df = pd.DataFrame({
+            "userId": test_user_ids,
+            "movieId": test_label_movie_ids,
+            "genre": test_label_genres,
+            "rating": test_label_ratings,
+            "month": test_label_months,
+            "day": test_label_days,
+            "hour": test_label_hours
+        })
+        print("-- Test vanilla shape: {}".format(test_vanilla_df.shape))
+        test_vanilla_df.to_csv(os.path.join(self.data_dir, 'vanilla_test.csv'),
+                               index=False)
+
+        # construct training and test dataset
+        train_df = pd.DataFrame({
+            'userId': train_user_ids,
+            'movieIdSeq': train_feat_movie_ids,
+            'genreSeq': train_feat_genres,
+            'ratingSeq': train_feat_ratings,
+            'monthSeq': train_feat_months,
+            'daySeq': train_feat_days,
+            'hourSeq': train_feat_hours,
+            'targetMovieId': train_label_movie_ids,
+            'targetGenre': train_label_genres,
+            'targetRating': train_label_ratings,
+            'targetMonth': train_label_months,
+            'targetDay': train_label_days,
+            'targetHour': train_label_hours
+        })
+        print("-- Train sequence shape: {}".format(train_df.shape))
+        train_df.to_csv(os.path.join(self.data_dir, 'sequence_train.csv'),
+                        index=False)
+
+        test_df = pd.DataFrame({
+            'userId': test_user_ids,
+            'movieIdSeq': test_feat_movie_ids,
+            'genreSeq': test_feat_genres,
+            'ratingSeq': test_feat_ratings,
+            'monthSeq': test_feat_months,
+            'daySeq': test_feat_days,
+            'hourSeq': test_feat_hours,
+            'targetMovieId': test_label_movie_ids,
+            'targetGenre': test_label_genres,
+            'targetRating': test_label_ratings,
+            'targetMonth': test_label_months,
+            'targetDay': test_label_days,
+            'targetHour': test_label_hours
+        })
+        print("-- Test sequence shape: {}".format(test_df.shape))
+        test_df.to_csv(os.path.join(self.data_dir, 'sequence_test.csv'),
+                       index=False)
+        print("-- Preprocessing is completed...")
 
 
 class RecSysDataset(object):
@@ -133,19 +368,29 @@ class RecSysDataset(object):
     def __init__(self,
                  dataset_name,
                  split='train',
+                 movielens_type='vanilla',
                  augmentation=False,
                  max_seq_length=200):
+        self.dataset = None
         if dataset_name not in dataset_map:
             raise ValueError(
-                f"Invalid dataset-name: {dataset_name}.\n"
-                "Should be one of the following: {dataset_map.keys()}")
-        if dataset_name in ('movielens-32m'):
-            data_dir = f"data/{dataset_map[self.dataset_name]}"
-            return MovieLensDataset(data_dir=data_dir,
-                                    split=split,
-                                    augmentation=augmentation,
-                                    max_seq_length=max_seq_length)
+                f'Invalid dataset-name: {dataset_name}.\n'
+                'Should be one of the following: {dataset_map.keys()}')
+        if dataset_name in ('movielens-32m', 'movielens-latest-small'):
+            data_dir = f'data/{dataset_map[dataset_name]}'
+            self.dataset = MovieLensDataset(data_dir=data_dir,
+                                            split=split,
+                                            type=movielens_type,
+                                            augmentation=augmentation,
+                                            max_seq_length=max_seq_length)
+
+    def get_dataset(self):
+        return self.dataset
 
 
 if __name__ == '__main__':
-    movielens_dataset = RecSysDataset(dataset_name='movielens-latest-small')
+    from torch.utils.data import DataLoader
+    movielens_dataset = RecSysDataset(dataset_name='movielens-32m',
+                                      movielens_type='sequence').get_dataset()
+    dataloader = DataLoader(movielens_dataset, batch_size=4)
+    # print(next(iter(dataloader)))
