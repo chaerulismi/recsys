@@ -87,4 +87,4 @@ class Trainer(object):
         print("Test Error:")
         print(f"- BinaryAUCROC: {self.metrics['BinaryAUCROC'].compute():.4f}")
         print(f"- Loss: {test_loss:.8f}")
-        return (test_loss, self.metrics["BinaryAUCROC"].compute())
+        return (test_loss, self.metrics["BinaryAUCROC"].compute().numpy())
